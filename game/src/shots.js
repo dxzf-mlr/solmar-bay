@@ -1,79 +1,101 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// Deterministic staging for screenshots: ?shot=start|drive|chase|mission
+// with an optional ?seed= puts the game into a fixed, readable scene, so the
+// screenshots are real renders of the game in a browser. Seeded traffic and
+// pedestrians come from G.rng, which main.js seeds from the URL.
 
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
+export function applyShotStaging(G) {
+  const params = new URLSearchParams(window.location.search);
+  const shot = params.get('shot');
+  if (!shot) return null;
 
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
-    }
+  const world = G.world;
+  const player = G.player;
+
+  if (shot === 'start') {
+    // The title screen over a slow orbit of the city at golden hour.
+    player.pos.set(0, 0, 96);
+    player.group.position.copy(player.pos);
+    player.cameraYaw = Math.PI * 0.85;
+    player.cameraPitch = 0.42;
+    G.setState('menu');
+    return 'start';
   }
-  return Infinity;
+
+  if (shot === 'drive') {
+    // Dana in her car, cruising the central avenue between the towers.
+    const car = G.vehicles.spawnPlayerCar();
+    car.pos.set(0, 0, 120);
+    car.heading = Math.PI;
+    car.speed = 22;
+    car.group.position.copy(car.pos);
+    car.group.rotation.y = car.heading;
+    player.inCar = true;
+    player.car = car;
+    G.vehicles.playerCar = car;
+    player.group.visible = false;
+    G.setState('playing');
+    G.hud.showMessage('Solmar Bay — drive the coast road.');
+    return 'drive';
+  }
+
+  if (shot === 'chase') {
+    // Three stars, two police cars closing in, a mission objective on screen.
+    const car = G.vehicles.spawnPlayerCar();
+    car.pos.set(0, 0, 64);
+    car.heading = Math.PI;
+    car.speed = 26;
+    car.group.position.copy(car.pos);
+    car.group.rotation.y = car.heading;
+    player.inCar = true;
+    player.car = car;
+    G.vehicles.playerCar = car;
+    player.group.visible = false;
+    // Mission 4 in progress: the objective line and the beacon show.
+    G.missions.currentIndex = 3;
+    G.missions.status = 'active';
+    G.missions.stepIndex = 2;
+    G.missions.beginStep();
+    G.police.setWanted(3);
+    for (let i = 0; i < 2; i++) {
+      const angle = Math.PI + (i - 0.5) * 0.7;
+      const pc = G.vehicles.spawnCar(
+        car.pos.x + Math.sin(angle) * 26,
+        car.pos.z + Math.cos(angle) * 26,
+        angle,
+        { police: true },
+      );
+      pc.speed = 24;
+      G.police.cars.push(pc);
+    }
+    G.setState('playing');
+    G.hud.showMessage('Three stars! Lose the cops and reach the safe house.');
+    return 'chase';
+  }
+
+  if (shot === 'mission') {
+    // Mission 5 at the pier: Dana on foot, the deal gone wrong, enemies in view.
+    G.missions.currentIndex = 4;
+    G.missions.status = 'active';
+    G.missions.stepIndex = 1;
+    player.pos.set(-300, 0, 0);
+    player.heading = -Math.PI / 2;
+    player.cameraYaw = -Math.PI / 2;
+    player.group.position.copy(player.pos);
+    player.group.rotation.y = player.heading;
+    G.missions.beginStep();
+    G.setState('playing');
+    G.hud.showMessage('Harbor Deal: survive the ambush.');
+    return 'mission';
+  }
+
+  return null;
 }
 
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
-  }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
-    }
-  }
-  return best;
-}
-
-/**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
- */
-export function stageShot(name, world) {
-  world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
-  }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
-  }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
+// Read the seed from the URL (?seed=12) or fall back to a fixed default so
+// a plain load is stable too.
+export function readSeedFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const raw = Number(params.get('seed'));
+  if (Number.isFinite(raw) && raw > 0) return Math.floor(raw);
+  return 20261118;
 }
